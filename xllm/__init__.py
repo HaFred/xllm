@@ -62,6 +62,8 @@ _PUBLIC_NAMES = {
     "Embedding",
     "LLM",
     "LLMMaster",
+    "REC",
+    "RecMaster",
     "VLM",
     "VLMMaster",
     "Options",
@@ -92,6 +94,7 @@ def _load_public_api() -> None:
     from xllm.pybind.args import ArgumentParser
     from xllm.pybind.embedding import Embedding
     from xllm.pybind.llm import LLM
+    from xllm.pybind.rec import REC
     from xllm.pybind.params import BeamSearchParams, PoolingParams, SamplingParams
 
     try:
@@ -105,6 +108,8 @@ def _load_public_api() -> None:
             "Embedding": Embedding,
             "LLM": LLM,
             "LLMMaster": xllm_export.LLMMaster,
+            "REC": REC,
+            "RecMaster": xllm_export.RecMaster,
             "VLM": VLM,
             "VLMMaster": xllm_export.VLMMaster,
             "Options": xllm_export.Options,
@@ -140,6 +145,8 @@ __all__ = [
     "Embedding",
     "LLM",
     "LLMMaster",
+    "REC",
+    "RecMaster",
     "VLM",
     "VLMMaster",
     "Options",

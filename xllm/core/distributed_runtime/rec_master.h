@@ -63,6 +63,9 @@ class RecMaster : public Master {
   // start the handling loop
   void run() override;
 
+  // blocking offline path: drain scheduled requests (mirrors LLMMaster::generate)
+  void generate();
+
   RecType rec_type() const { return rec_type_; }
 
  private:

@@ -1,0 +1,7 @@
+{
+  "beam_width": 64,
+  "max_tokens": 3,
+  "top_logprobs": 64,
+  "top_k": 64,
+  "temperature": 1.0
+}

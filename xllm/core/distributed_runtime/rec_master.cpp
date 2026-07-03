@@ -602,6 +602,17 @@ void RecMaster::run() {
   // Engine run method is not available, remove this call
 }
 
+void RecMaster::generate() {
+  const bool already_running = running_.load(std::memory_order_relaxed);
+  if (already_running) {
+    LOG(WARNING) << "RecMaster generate() cannot run while run() loop is active.";
+    return;
+  }
+  running_.store(true, std::memory_order_relaxed);
+  scheduler_->generate();
+  running_.store(false, std::memory_order_relaxed);
+}
+
 RecMaster::~RecMaster() {
   // set stop flag
   stopped_.store(true, std::memory_order_relaxed);

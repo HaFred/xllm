@@ -20,11 +20,16 @@ limitations under the License.
 #include <torch/python.h>
 
 #include "api_service/call.h"
+#include "core/common/global_flags.h"
 #include "core/common/options.h"
 #include "core/common/types.h"
 #include "core/distributed_runtime/llm_master.h"
+#include "core/distributed_runtime/rec_master.h"
 #include "core/distributed_runtime/vlm_master.h"
+#include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/rec_config.h"
+#include "core/framework/config/scheduler_config.h"
 #include "core/framework/multimodal/mm_data.h"
 #include "core/framework/request/request_output.h"
 #include "core/framework/request/request_params.h"
@@ -104,7 +109,10 @@ PYBIND11_MODULE(xllm_export, m) {
       .def_readwrite("output_shm_size", &Options::output_shm_size_)
       .def_readwrite("is_local", &Options::is_local_)
       .def_readwrite("enable_sleep_mode", &Options::enable_sleep_mode_)
-      .def_readwrite("kv_cache_dtype", &Options::kv_cache_dtype_);
+      .def_readwrite("kv_cache_dtype", &Options::kv_cache_dtype_)
+      .def_readwrite("beam_width", &Options::beam_width_)
+      .def_readwrite("rec_worker_max_concurrency",
+                     &Options::rec_worker_max_concurrency_);
 
   // 2. export LLMMaster
   py::class_<LLMMaster>(m, "LLMMaster")
@@ -193,6 +201,68 @@ PYBIND11_MODULE(xllm_export, m) {
           py::call_guard<py::gil_scoped_release>())
       .def("__repr__", [](const LLMMaster& self) {
         return "LLMMaster({})"_s.format(self.options());
+      });
+
+  // 2b. export RecMaster (backend=rec)
+  py::class_<RecMaster>(m, "RecMaster")
+      .def(py::init<const Options&>(),
+           py::arg("options"),
+           py::call_guard<py::gil_scoped_release>())
+      .def(
+          "handle_prompt_request",
+          [](RecMaster& self,
+             std::string prompt,
+             RequestParams sp,
+             OutputCallback callback) {
+            self.handle_request(std::move(prompt),
+                                std::nullopt,
+                                std::nullopt,
+                                std::move(sp),
+                                std::move(callback));
+          },
+          py::arg("prompt"),
+          py::arg("request_params"),
+          py::arg("callback"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "handle_chat_request",
+          [](RecMaster& self,
+             std::vector<Message> messages,
+             RequestParams sp,
+             OutputCallback callback) {
+            self.handle_request(std::move(messages),
+                                std::nullopt,
+                                std::nullopt,
+                                std::move(sp),
+                                std::move(callback));
+          },
+          py::arg("messages"),
+          py::arg("request_params"),
+          py::arg("callback"),
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "handle_token_request",
+          [](RecMaster& self,
+             const std::vector<int>& prompt_tokens,
+             RequestParams sp,
+             OutputCallback callback) {
+            self.handle_request(
+                prompt_tokens, std::nullopt, std::move(sp), std::move(callback));
+          },
+          py::arg("prompt_tokens"),
+          py::arg("request_params"),
+          py::arg("callback"),
+          py::call_guard<py::gil_scoped_release>())
+      .def("run", &RecMaster::run, py::call_guard<py::gil_scoped_release>())
+      .def("generate",
+           &RecMaster::generate,
+           py::call_guard<py::gil_scoped_release>())
+      .def("options",
+           &RecMaster::options,
+           py::call_guard<py::gil_scoped_release>())
+      .def("rec_type", &RecMaster::rec_type, py::call_guard<py::gil_scoped_release>())
+      .def("__repr__", [](const RecMaster& self) {
+        return "RecMaster({})"_s.format(self.options());
       });
 
   // 3. export SampleSlot
@@ -399,6 +469,37 @@ PYBIND11_MODULE(xllm_export, m) {
   m.def("get_model_backend",
         &ModelRegistry::get_model_backend,
         py::arg("model_type"));
+  m.def(
+      "configure_rec_runtime",
+      [](int32_t max_decode_rounds,
+         int32_t beam_width,
+         int32_t max_seqs_per_batch,
+         int32_t max_tokens_per_batch,
+         int32_t block_size,
+         bool enable_rec_fast_sampler,
+         bool enable_chunked_prefill) {
+        FLAGS_max_decode_rounds = max_decode_rounds;
+        FLAGS_beam_width = beam_width;
+        FLAGS_max_seqs_per_batch = max_seqs_per_batch;
+        FLAGS_max_tokens_per_batch = max_tokens_per_batch;
+        FLAGS_block_size = block_size;
+
+        BeamSearchConfig::get_instance().beam_width(beam_width);
+        RecConfig::get_instance()
+            .max_decode_rounds(max_decode_rounds)
+            .enable_rec_fast_sampler(enable_rec_fast_sampler);
+        SchedulerConfig::get_instance()
+            .max_seqs_per_batch(max_seqs_per_batch)
+            .max_tokens_per_batch(max_tokens_per_batch)
+            .enable_chunked_prefill(enable_chunked_prefill);
+      },
+      py::arg("max_decode_rounds"),
+      py::arg("beam_width"),
+      py::arg("max_seqs_per_batch"),
+      py::arg("max_tokens_per_batch"),
+      py::arg("block_size"),
+      py::arg("enable_rec_fast_sampler") = true,
+      py::arg("enable_chunked_prefill") = false);
   m.def(
       "configure_cpp_chat_template",
       [](bool use_cpp_chat_template, const std::string& model_type) {

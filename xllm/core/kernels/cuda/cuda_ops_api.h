@@ -220,7 +220,24 @@ std::pair<torch::Tensor, torch::Tensor> compute_topk_for_beam_search(
     uint32_t batch_size,
     uint32_t beam_size,
     uint32_t top_k,
-    torch::Device device);
+    uint32_t num_return_sequences,
+    torch::Device device,
+    bool is_largest = true,
+    bool sorted = false);
+
+// REC multi-round beam search step (see rec_beam_search.cu).
+void beam_search(torch::Tensor acc_logprob,
+                 torch::Tensor in_sequence_group,
+                 torch::Tensor top_tokens,
+                 torch::Tensor top_logprobs,
+                 torch::Tensor out_acc_logprob,
+                 torch::Tensor out_token_ids,
+                 torch::Tensor out_token_index,
+                 torch::Tensor out_beam_count_prefix_sums,
+                 torch::Tensor out_sequence_group,
+                 uint32_t batch_size,
+                 uint32_t num_return_sequences,
+                 uint32_t current_step);
 
 std::pair<torch::Tensor, torch::Tensor> compute_topk_general(
     torch::Tensor input,
