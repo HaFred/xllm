@@ -53,6 +53,10 @@ class RecEngine : public Engine {
 
   std::vector<int64_t> get_active_activation_memory() const override;
 
+  bool start_profile() override;
+
+  bool stop_profile() override;
+
  private:
   // ============================================================
   // RecEnginePipeline: Abstract base class for rec engine execution

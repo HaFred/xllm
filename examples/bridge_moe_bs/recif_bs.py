@@ -73,6 +73,12 @@ from libs.perf_slo import (
     print_stage_metrics,
     sync_device,
 )
+from libs.torch_profile import (
+    configure_xllm_torch_profile,
+    profile_traces_enabled,
+    resolve_profile_dir,
+    xllm_rec_profile_session,
+)
 
 try:
     from xllm import BeamSearchParams, REC
@@ -372,6 +378,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         prefix = build_prefix_tensor(history, device)
     else:
         beam_width, top_k = _resolve_beam_and_topk(bf, args.beam)
+        profile_dir = resolve_profile_dir(args.out_dir)
+        configure_xllm_torch_profile(
+            enabled=profile_traces_enabled(),
+            profile_dir=profile_dir,
+        )
         rec = REC(
             model=model_dir,
             devices=device,
@@ -383,6 +394,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             enable_prefix_cache=False,
             enable_chunked_prefill=False,
         )
+        rec._profile_dir = profile_dir  # used by xllm_rec_profile_session
         xllm_params = BeamSearchParams(
             beam_width=beam_width,
             max_tokens=args.max_decode_rounds,
@@ -405,107 +417,117 @@ def main(argv: Optional[List[str]] = None) -> int:
     bench_start = time.perf_counter()
     num_batches = (num_requests + batch_size - 1) // batch_size
     last_error: str | None = None
-    for batch_idx in range(num_batches):
-        batch_start = batch_idx * batch_size
-        batch_end = min(batch_start + batch_size, num_requests)
-        current_batch_size = batch_end - batch_start
-        batch_wall_start = time.perf_counter()
-        try:
-            if args.backend == "hf":
-                batch_predictions, batch_timings = _run_hf_batch(
-                    model,
-                    heads,
-                    prefix,
-                    bf=bf,
-                    beam=args.beam,
-                    batch_size=current_batch_size,
-                    perf_totals=run_perf_totals,
-                    perf_estimator=perf_estimator,
-                )
+
+    def _run_benchmark_batches() -> None:
+        nonlocal last_error
+        for batch_idx in range(num_batches):
+            batch_start = batch_idx * batch_size
+            batch_end = min(batch_start + batch_size, num_requests)
+            current_batch_size = batch_end - batch_start
+            batch_wall_start = time.perf_counter()
+            try:
+                if args.backend == "hf":
+                    batch_predictions, batch_timings = _run_hf_batch(
+                        model,
+                        heads,
+                        prefix,
+                        bf=bf,
+                        beam=args.beam,
+                        batch_size=current_batch_size,
+                        perf_totals=run_perf_totals,
+                        perf_estimator=perf_estimator,
+                    )
+                    sync_device(device)
+                    for offset in range(current_batch_size):
+                        req_idx = batch_start + offset
+                        timings = batch_timings[offset]
+                        request_perfs.append(
+                            RequestPerf(
+                                success=True,
+                                input_tokens=input_tokens,
+                                output_tokens=OUTPUT_TOKENS_PER_REQUEST,
+                                ttft_s=timings["ttft_s"],
+                                e2el_s=timings["e2el_s"],
+                                itl_s=list(timings["itl_s"]),
+                            )
+                        )
+                        all_request_outputs.append(
+                            {
+                                "request_index": req_idx,
+                                "batch_index": batch_idx,
+                                "success": True,
+                                "predictions": batch_predictions[offset],
+                            }
+                        )
+                else:
+                    batch_predictions, batch_elapsed = _run_xllm_batch(
+                        rec,
+                        token_prompt,
+                        xllm_params,
+                        batch_size=current_batch_size,
+                        debug=args.debug and batch_idx == 0,
+                    )
+                    sync_device(device)
+                    batch_timings = _xllm_timings_from_e2el(batch_elapsed)
+                    record_recif_beam_search_batch(
+                        run_perf_totals,
+                        perf_estimator,
+                        batch_size=current_batch_size,
+                        prefix_len=input_tokens,
+                        bf=bf,
+                        beam=args.beam,
+                    )
+                    for offset in range(current_batch_size):
+                        req_idx = batch_start + offset
+                        request_perfs.append(
+                            RequestPerf(
+                                success=True,
+                                input_tokens=input_tokens,
+                                output_tokens=OUTPUT_TOKENS_PER_REQUEST,
+                                ttft_s=batch_timings["ttft_s"],
+                                e2el_s=batch_elapsed,
+                                itl_s=list(batch_timings["itl_s"]),
+                            )
+                        )
+                        all_request_outputs.append(
+                            {
+                                "request_index": req_idx,
+                                "batch_index": batch_idx,
+                                "success": True,
+                                "predictions": batch_predictions[offset],
+                            }
+                        )
+            except Exception as exc:
+                last_error = str(exc)
                 sync_device(device)
+                batch_e2el_s = time.perf_counter() - batch_wall_start
                 for offset in range(current_batch_size):
                     req_idx = batch_start + offset
-                    timings = batch_timings[offset]
                     request_perfs.append(
                         RequestPerf(
-                            success=True,
+                            success=False,
                             input_tokens=input_tokens,
-                            output_tokens=OUTPUT_TOKENS_PER_REQUEST,
-                            ttft_s=timings["ttft_s"],
-                            e2el_s=timings["e2el_s"],
-                            itl_s=list(timings["itl_s"]),
+                            output_tokens=0,
+                            e2el_s=batch_e2el_s,
+                            error=last_error,
                         )
                     )
                     all_request_outputs.append(
                         {
                             "request_index": req_idx,
                             "batch_index": batch_idx,
-                            "success": True,
-                            "predictions": batch_predictions[offset],
+                            "success": False,
+                            "error": last_error,
+                            "predictions": [],
                         }
                     )
-            else:
-                batch_predictions, batch_elapsed = _run_xllm_batch(
-                    rec,
-                    token_prompt,
-                    xllm_params,
-                    batch_size=current_batch_size,
-                    debug=args.debug and batch_idx == 0,
-                )
-                sync_device(device)
-                batch_timings = _xllm_timings_from_e2el(batch_elapsed)
-                record_recif_beam_search_batch(
-                    run_perf_totals,
-                    perf_estimator,
-                    batch_size=current_batch_size,
-                    prefix_len=input_tokens,
-                    bf=bf,
-                    beam=args.beam,
-                )
-                for offset in range(current_batch_size):
-                    req_idx = batch_start + offset
-                    request_perfs.append(
-                        RequestPerf(
-                            success=True,
-                            input_tokens=input_tokens,
-                            output_tokens=OUTPUT_TOKENS_PER_REQUEST,
-                            ttft_s=batch_timings["ttft_s"],
-                            e2el_s=batch_elapsed,
-                            itl_s=list(batch_timings["itl_s"]),
-                        )
-                    )
-                    all_request_outputs.append(
-                        {
-                            "request_index": req_idx,
-                            "batch_index": batch_idx,
-                            "success": True,
-                            "predictions": batch_predictions[offset],
-                        }
-                    )
-        except Exception as exc:
-            last_error = str(exc)
-            sync_device(device)
-            batch_e2el_s = time.perf_counter() - batch_wall_start
-            for offset in range(current_batch_size):
-                req_idx = batch_start + offset
-                request_perfs.append(
-                    RequestPerf(
-                        success=False,
-                        input_tokens=input_tokens,
-                        output_tokens=0,
-                        e2el_s=batch_e2el_s,
-                        error=last_error,
-                    )
-                )
-                all_request_outputs.append(
-                    {
-                        "request_index": req_idx,
-                        "batch_index": batch_idx,
-                        "success": False,
-                        "error": last_error,
-                        "predictions": [],
-                    }
-                )
+
+    if args.backend == "xllm":
+        with xllm_rec_profile_session(rec):
+            _run_benchmark_batches()
+    else:
+        _run_benchmark_batches()
+
     bench_duration = time.perf_counter() - bench_start
 
     successful_outputs = [row for row in all_request_outputs if row["success"]]

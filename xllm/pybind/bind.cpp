@@ -28,6 +28,7 @@ limitations under the License.
 #include "core/distributed_runtime/vlm_master.h"
 #include "core/framework/config/beam_search_config.h"
 #include "core/framework/config/model_config.h"
+#include "core/framework/config/profile_config.h"
 #include "core/framework/config/rec_config.h"
 #include "core/framework/config/scheduler_config.h"
 #include "core/framework/multimodal/mm_data.h"
@@ -246,8 +247,10 @@ PYBIND11_MODULE(xllm_export, m) {
              const std::vector<int>& prompt_tokens,
              RequestParams sp,
              OutputCallback callback) {
-            self.handle_request(
-                prompt_tokens, std::nullopt, std::move(sp), std::move(callback));
+            self.handle_request(prompt_tokens,
+                                std::nullopt,
+                                std::move(sp),
+                                std::move(callback));
           },
           py::arg("prompt_tokens"),
           py::arg("request_params"),
@@ -257,10 +260,18 @@ PYBIND11_MODULE(xllm_export, m) {
       .def("generate",
            &RecMaster::generate,
            py::call_guard<py::gil_scoped_release>())
+      .def("start_profile",
+           &RecMaster::start_profile,
+           py::call_guard<py::gil_scoped_release>())
+      .def("stop_profile",
+           &RecMaster::stop_profile,
+           py::call_guard<py::gil_scoped_release>())
       .def("options",
            &RecMaster::options,
            py::call_guard<py::gil_scoped_release>())
-      .def("rec_type", &RecMaster::rec_type, py::call_guard<py::gil_scoped_release>())
+      .def("rec_type",
+           &RecMaster::rec_type,
+           py::call_guard<py::gil_scoped_release>())
       .def("__repr__", [](const RecMaster& self) {
         return "RecMaster({})"_s.format(self.options());
       });
@@ -500,6 +511,19 @@ PYBIND11_MODULE(xllm_export, m) {
       py::arg("block_size"),
       py::arg("enable_rec_fast_sampler") = true,
       py::arg("enable_chunked_prefill") = false);
+  m.def(
+      "configure_torch_profile",
+      [](bool enable_online_profile, const std::string& profile_dir) {
+        FLAGS_enable_online_profile = enable_online_profile;
+        if (!profile_dir.empty()) {
+          FLAGS_profile_dir = profile_dir;
+        }
+        ProfileConfig::get_instance().enable_online_profile(
+            enable_online_profile);
+        ProfileConfig::get_instance().profile_dir(profile_dir);
+      },
+      py::arg("enable_online_profile"),
+      py::arg("profile_dir") = "");
   m.def(
       "configure_cpp_chat_template",
       [](bool use_cpp_chat_template, const std::string& model_type) {

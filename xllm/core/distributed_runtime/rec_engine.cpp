@@ -1214,6 +1214,88 @@ RecEngine::RecMultiRoundEnginePipeline::get_active_activation_memory() const {
   return active_activation_memories;
 }
 
+bool RecEngine::start_profile() {
+  if (!worker_clients_.empty()) {
+    LOG(INFO) << "Starting profiler on " << worker_clients_num_
+              << " REC worker client(s).";
+    std::vector<folly::SemiFuture<bool>> futures;
+    futures.reserve(worker_clients_num_);
+    for (auto& worker : worker_clients_) {
+      futures.push_back(worker->start_profile_async());
+    }
+    auto results = folly::collectAll(futures).get();
+    for (const auto& result : results) {
+      if (!result.value()) {
+        LOG(ERROR) << "Start profile failed on a REC worker client.";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (!workers_.empty()) {
+    LOG(INFO) << "Starting profiler on " << workers_.size()
+              << " local REC worker(s).";
+    std::vector<folly::SemiFuture<bool>> futures;
+    futures.reserve(workers_.size());
+    for (auto& worker : workers_) {
+      futures.push_back(worker->start_profile_async());
+    }
+    auto results = folly::collectAll(futures).get();
+    for (const auto& result : results) {
+      if (!result.value()) {
+        LOG(ERROR) << "Start profile failed on a local REC worker.";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  LOG(ERROR) << "No REC workers available to start profiling.";
+  return false;
+}
+
+bool RecEngine::stop_profile() {
+  if (!worker_clients_.empty()) {
+    LOG(INFO) << "Stopping profiler on " << worker_clients_num_
+              << " REC worker client(s).";
+    std::vector<folly::SemiFuture<bool>> futures;
+    futures.reserve(worker_clients_num_);
+    for (auto& worker : worker_clients_) {
+      futures.push_back(worker->stop_profile_async());
+    }
+    auto results = folly::collectAll(futures).get();
+    for (const auto& result : results) {
+      if (!result.value()) {
+        LOG(ERROR) << "Stop profile failed on a REC worker client.";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (!workers_.empty()) {
+    LOG(INFO) << "Stopping profiler on " << workers_.size()
+              << " local REC worker(s).";
+    std::vector<folly::SemiFuture<bool>> futures;
+    futures.reserve(workers_.size());
+    for (auto& worker : workers_) {
+      futures.push_back(worker->stop_profile_async());
+    }
+    auto results = folly::collectAll(futures).get();
+    for (const auto& result : results) {
+      if (!result.value()) {
+        LOG(ERROR) << "Stop profile failed on a local REC worker.";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  LOG(ERROR) << "No REC workers available to stop profiling.";
+  return false;
+}
+
 // ============================================================
 // RecEngine pipeline factory (static method)
 // ============================================================

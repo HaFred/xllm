@@ -156,6 +156,12 @@ class REC:
         self._max_decode_rounds = max_decode_rounds
         self.master = RecMaster(options)
 
+    def start_profile(self) -> bool:
+        return bool(self.master.start_profile())
+
+    def stop_profile(self) -> bool:
+        return bool(self.master.stop_profile())
+
     def finish(self) -> None:
         try:
             utils.terminate_process(os.getpid())
