@@ -190,6 +190,35 @@ AttentionMetadata build_attention_metadata(
         torch::diff(params.attention.device.q_seq_lens);  // q seqlens
 #endif
   }
+#if defined(USE_CUDA) || defined(USE_MUSA)
+  // CUDA/MUSA decode and xAttention two-stage paths require per-sequence KV
+  // lengths. Unlike MLU/DCU, these backends were previously excluded from the
+  // diff() path above, leaving attn_metadata.kv_seq_lens undefined during
+  // multi-round REC decode planning.
+  if (!attn_metadata.is_prefill || enable_mla) {
+    if (!attn_metadata.kv_seq_lens.defined() ||
+        attn_metadata.kv_seq_lens.numel() == 0) {
+      if (attn_metadata.paged_kv_last_page_len.defined() &&
+          attn_metadata.paged_kv_last_page_len.numel() > 0) {
+        attn_metadata.kv_seq_lens = attn_metadata.paged_kv_last_page_len;
+      } else if (attn_metadata.kv_cu_seq_lens.defined() &&
+                 attn_metadata.kv_cu_seq_lens.numel() > 1) {
+        attn_metadata.kv_seq_lens = torch::diff(attn_metadata.kv_cu_seq_lens);
+      } else if (params.attention.device.kv_seq_lens.defined() &&
+                 params.attention.device.kv_seq_lens.numel() > 1) {
+        attn_metadata.kv_seq_lens =
+            torch::diff(params.attention.device.kv_seq_lens);
+      }
+    }
+    if ((!attn_metadata.q_seq_lens.defined() ||
+         attn_metadata.q_seq_lens.numel() == 0) &&
+        params.attention.device.q_seq_lens.defined() &&
+        params.attention.device.q_seq_lens.numel() > 1) {
+      attn_metadata.q_seq_lens =
+          torch::diff(params.attention.device.q_seq_lens);
+    }
+  }
+#endif
 #if defined(USE_NPU)
   // NPU path uses per-sequence lengths (not cumulative), so no diff.
   // Ensure per-sequence lengths are available for NPU kernels in all phases.

@@ -9,6 +9,9 @@
 # CMake
 /build*
 
+third_party/
+/home/dyvm6xra/dyvm6xrauser45/fred/local_backup_vllmgr/xllm/third_party
+
 # vcpkg
 /.vcpkg*
 
@@ -59,3 +62,15 @@ compile_commands.json
 /local
 /logs
 /log
+examples/bridge_moe_bs/xllm_hf_export/*
+examples/bridge_moe_bs/xllm_hf_export/export.log
+examples/bridge_moe_bs/xllm_hf_export/model.safetensors
+examples/bridge_moe_bs/xllm_hf_export/recif_export_meta.json
+examples/bridge_moe_bs/xllm_hf_export/recif_external_heads.safetensors
+examples/bridge_moe_bs/xllm_hf_export/added_tokens.json
+examples/bridge_moe_bs/xllm_hf_export/merges.txt
+examples/bridge_moe_bs/xllm_hf_export/special_tokens_map.json
+examples/bridge_moe_bs/xllm_hf_export/tokenizer_config.json
+examples/bridge_moe_bs/xllm_hf_export/tokenizer.json
+examples/bridge_moe_bs/xllm_hf_export/vocab.json
+examples/bridge_moe_bs/recif_common.py

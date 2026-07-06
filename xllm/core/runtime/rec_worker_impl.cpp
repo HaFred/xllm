@@ -2534,31 +2534,49 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_two_stage_round_input(
   // previous_step corresponds to the decode step that produced tokens for
   // this round.
   const int32_t previous_step = round - 1;
-  if (previous_step == 0) {
-    // First decode step uses top_tokens from prefill.
-    if (top_tokens.defined()) {
-      input.token_ids = top_tokens.reshape({-1});
-    }
-  } else if (previous_step > 0) {
-    // Later steps use beam search output tokens.
-    input.token_ids = beam_tensors.out_token_ids.reshape({-1});
-  }
+  (void)top_tokens;
+  const int32_t batch_size = std::max<int32_t>(llm_rec_params.batch_size, 0);
+  const int32_t beam_width = std::max<int32_t>(llm_rec_params.beam_width, 1);
+  // Always use beam-search output tokens (one per expanded beam slot). Using
+  // flattened top_tokens from sampling would produce batch*top_k tokens while
+  // decode positions and attention metadata are sized for batch*beam_width.
+  input.token_ids = beam_tensors.out_token_ids.reshape({-1});
 
-  if (!llm_rec_params.decode_positions_tensor_list.empty() &&
-      previous_step >= 0 &&
-      previous_step < static_cast<int32_t>(
-                          llm_rec_params.decode_positions_tensor_list.size())) {
-    input.positions =
-        llm_rec_params.decode_positions_tensor_list[previous_step];
+  const auto* step_meta = input.step_meta();
+  CHECK(step_meta != nullptr)
+      << "step_meta is required for two-stage rec multi-round decode";
+  CHECK_EQ(step_meta->decode_positions_vec.size(),
+           static_cast<size_t>(batch_size))
+      << "decode_positions_vec size mismatch in two-stage decode";
+  CHECK_EQ(input.token_ids.size(0),
+           static_cast<int64_t>(batch_size) * beam_width)
+      << "token_ids must have one entry per expanded beam slot";
+
+  std::vector<int32_t> positions_host;
+  positions_host.reserve(static_cast<size_t>(batch_size * beam_width));
+  std::vector<int32_t> selected_token_idxes;
+  selected_token_idxes.reserve(static_cast<size_t>(batch_size * beam_width));
+  for (int32_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
+    const int32_t base_position =
+        step_meta->decode_positions_vec[static_cast<size_t>(seq_idx)] +
+        previous_step;
+    for (int32_t beam_idx = 0; beam_idx < beam_width; ++beam_idx) {
+      positions_host.emplace_back(base_position);
+      selected_token_idxes.emplace_back(seq_idx * beam_width + beam_idx);
+    }
   }
+  auto int_options = torch::TensorOptions()
+                         .dtype(torch::kInt32)
+                         .device(runtime_.worker.device());
+  input.positions = torch::tensor(positions_host, int_options);
+  input.decoder_sampling_params.selected_token_idxes =
+      torch::tensor(selected_token_idxes, int_options);
 
   input.input_params.meta.batch_forward_type = BatchForwardType(2);
   input.input_params.embedding.input_embedding = torch::Tensor();
   cached_current_round_tensor_.fill_(previous_step);
   llm_rec_params.current_round_tensor = cached_current_round_tensor_;
 
-  const int32_t batch_size = std::max<int32_t>(llm_rec_params.batch_size, 0);
-  const int32_t beam_width = std::max<int32_t>(llm_rec_params.beam_width, 1);
   const int64_t total_beam = static_cast<int64_t>(batch_size) * beam_width;
 
   CHECK_LE(total_beam, cached_two_stage_shared_lse_.size(0))
@@ -2587,9 +2605,6 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_two_stage_round_input(
   llm_rec_params.two_stage_paged_kv_last_page_len_expanded =
       cached_two_stage_paged_kv_last_page_len_expanded_.slice(0, 0, total_beam);
 
-  auto int_options = torch::TensorOptions()
-                         .dtype(torch::kInt32)
-                         .device(runtime_.worker.device());
   auto q_cu_seq_lens_values =
       torch::arange(0, (batch_size + 1) * beam_width, beam_width, int_options);
   llm_rec_params.two_stage_q_cu_seq_lens_shared.copy_(q_cu_seq_lens_values,
@@ -2640,21 +2655,41 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_round_input_for_npu(
   input.input_params.attn_metadata = nullptr;
 
   if (round > 0) {
-    if (round == 1) {
-      if (top_tokens.defined()) {
-        input.token_ids = top_tokens.reshape({-1});
-      }
-    } else {
-      input.token_ids = beam_tensors.out_token_ids.reshape({-1});
-    }
+    (void)top_tokens;
+    input.token_ids = beam_tensors.out_token_ids.reshape({-1});
 
     const int32_t decode_step = round - 1;
-    if (!llm_rec_params.decode_positions_tensor_list.empty() &&
-        decode_step < static_cast<int32_t>(
-                          llm_rec_params.decode_positions_tensor_list.size())) {
-      input.positions =
-          llm_rec_params.decode_positions_tensor_list[decode_step];
+    const auto* step_meta = input.step_meta();
+    CHECK(step_meta != nullptr)
+        << "step_meta is required for rec multi-round decode";
+    const int32_t batch_size = std::max<int32_t>(llm_rec_params.batch_size, 0);
+    const int32_t beam_width = std::max<int32_t>(llm_rec_params.beam_width, 1);
+    CHECK_EQ(step_meta->decode_positions_vec.size(),
+             static_cast<size_t>(batch_size))
+        << "decode_positions_vec size mismatch in NPU decode";
+    CHECK_EQ(input.token_ids.size(0),
+             static_cast<int64_t>(batch_size) * beam_width)
+        << "token_ids must have one entry per expanded beam slot";
+
+    std::vector<int32_t> positions_host;
+    positions_host.reserve(static_cast<size_t>(batch_size * beam_width));
+    std::vector<int32_t> selected_token_idxes;
+    selected_token_idxes.reserve(static_cast<size_t>(batch_size * beam_width));
+    for (int32_t seq_idx = 0; seq_idx < batch_size; ++seq_idx) {
+      const int32_t base_position =
+          step_meta->decode_positions_vec[static_cast<size_t>(seq_idx)] +
+          decode_step;
+      for (int32_t beam_idx = 0; beam_idx < beam_width; ++beam_idx) {
+        positions_host.emplace_back(base_position);
+        selected_token_idxes.emplace_back(seq_idx * beam_width + beam_idx);
+      }
     }
+    auto int_options = torch::TensorOptions()
+                           .dtype(torch::kInt32)
+                           .device(runtime_.worker.device());
+    input.positions = torch::tensor(positions_host, int_options);
+    input.decoder_sampling_params.selected_token_idxes =
+        torch::tensor(selected_token_idxes, int_options);
 
     input.input_params.meta.batch_forward_type = BatchForwardType::DECODE;
     input.input_params.embedding.input_embedding = torch::Tensor();

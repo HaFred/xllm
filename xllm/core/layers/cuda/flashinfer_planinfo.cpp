@@ -62,6 +62,10 @@ static ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
 }
 
 static torch::Tensor get_kv_len_arr_host(const AttentionMetadata& attn_meta) {
+  if (attn_meta.paged_kv_last_page_len.defined() &&
+      attn_meta.paged_kv_last_page_len.numel() > 0) {
+    return attn_meta.paged_kv_last_page_len.to(torch::kCPU);
+  }
   if (attn_meta.kv_seq_lens.defined()) {
     return attn_meta.kv_seq_lens.to(torch::kCPU);
   }

@@ -36,6 +36,24 @@ namespace xllm::layer::xattention {
 // This function immediately copies all data to avoid any dependency on TVM
 // runtime
 // intentional duplication for xattention isolation
+static torch::Tensor get_kv_len_arr_host(const AttentionMetadata& attn_meta) {
+  // Per-beam paged decode metadata is authoritative when present. Batch-level
+  // kv_seq_lens from attention_metadata_builder can be much shorter than the
+  // expanded beam rows used by two-stage unshared xAttention planning.
+  if (attn_meta.paged_kv_last_page_len.defined() &&
+      attn_meta.paged_kv_last_page_len.numel() > 0) {
+    return attn_meta.paged_kv_last_page_len.to(torch::kCPU);
+  }
+  if (attn_meta.kv_seq_lens.defined() && attn_meta.kv_seq_lens.numel() > 0) {
+    return attn_meta.kv_seq_lens.to(torch::kCPU);
+  }
+  CHECK(attn_meta.kv_cu_seq_lens.defined())
+      << "kv_seq_lens, paged_kv_last_page_len, or kv_cu_seq_lens must be "
+         "defined for xAttention decode planning.";
+  torch::Tensor kv_cu_seq_lens_host = attn_meta.kv_cu_seq_lens.to(torch::kCPU);
+  return kv_cu_seq_lens_host.slice(0, 1) - kv_cu_seq_lens_host.slice(0, 0, -1);
+}
+
 static ffi::Array<int64_t> deep_copy_plan_info(const ffi::Array<int64_t>& src) {
   // Get size first - this might fail if Array is invalid
   if (!src.defined()) {
@@ -128,13 +146,26 @@ void update_xattention_plan_info(std::shared_ptr<PlanInfo> plan_info,
                               /*use_logits_soft_cap=*/false,
                               /*use_fp16_qk_reduction=*/false);
 
-    torch::Tensor qo_indptr_host = attn_meta.q_cu_seq_lens.to(torch::kCPU);
+    torch::Tensor qo_indptr_host;
+    if (attn_meta.xattention_two_stage_decode_cache.has_value()) {
+      const auto& cache = attn_meta.xattention_two_stage_decode_cache.value();
+      if (cache.q_cu_seq_lens_shared.defined()) {
+        qo_indptr_host = cache.q_cu_seq_lens_shared.to(torch::kCPU);
+      }
+    }
+    if (!qo_indptr_host.defined()) {
+      qo_indptr_host = attn_meta.q_cu_seq_lens.to(torch::kCPU);
+    }
     torch::Tensor kv_cu_seq_lens_host =
         attn_meta.kv_cu_seq_lens.to(torch::kCPU);
+    const int64_t batch_size = qo_indptr_host.size(0) - 1;
+    CHECK_GT(batch_size, 0) << "invalid batch_size for shared xAttention plan";
+    qo_indptr_host = qo_indptr_host.slice(0, 0, batch_size + 1);
+    kv_cu_seq_lens_host = kv_cu_seq_lens_host.slice(0, 0, batch_size + 1);
+    const int64_t total_num_rows = qo_indptr_host[-1].item<int64_t>();
+
     torch::Tensor kv_len_arr_host =
         kv_cu_seq_lens_host.slice(0, 1) - kv_cu_seq_lens_host.slice(0, 0, -1);
-    const int64_t total_num_rows = qo_indptr_host[-1].item<int64_t>();
-    const int64_t batch_size = qo_indptr_host.size(0) - 1;
 
     // Get plan_info from TVM function and immediately deep copy it to avoid
     // lifetime issues We must copy immediately because the TVM Array may become
@@ -207,30 +238,50 @@ void update_xattention_plan_info(std::shared_ptr<PlanInfo> plan_info,
       torch::Tensor qo_indptr = qo_indptr_host.to(torch::kCUDA);
       torch::Tensor paged_kv_indptr_host =
           attn_meta.paged_kv_indptr.to(torch::kCPU);
-      torch::Tensor kv_len_arr_host = attn_meta.kv_seq_lens.to(torch::kCPU);
+      torch::Tensor kv_len_arr_host = get_kv_len_arr_host(attn_meta);
 
-      plan_info->plan_info =
-          deep_copy_plan_info(get_function(plan_info->uri, "plan")(
-                                  ffi_float_workspace_buffer,
-                                  ffi_int_workspace_buffer,
-                                  ffi_page_locked_int_workspace_buffer,
-                                  to_ffi_tensor(qo_indptr_host),
-                                  to_ffi_tensor(paged_kv_indptr_host),
-                                  to_ffi_tensor(kv_len_arr_host),
-                                  batch_size,  // total_num_rows
-                                  batch_size,
-                                  num_qo_heads,  // num_qo_heads
-                                  num_kv_heads,  // num_kv_heads
-                                  block_size,    // block_size
-                                  enable_cuda_graph,
-                                  head_dim_qk,  // head_dim_qk
-                                  head_dim_vo,  // head_dim_vo
-                                  /*causal=*/false,
-                                  /*window_size_left=*/-1,
-                                  /*fixed_split_size=*/-1,
-                                  /*disable_split_kv=*/false,
-                                  /*num_colocated_ctas=*/0)
-                                  .cast<ffi::Array<int64_t>>());
+      auto plan_func = get_function(plan_info->uri, "plan");
+      const bool use_sm90_short_plan_args =
+          Platform::is_support_sm90a() && backend == "fa3";
+      plan_info->plan_info = deep_copy_plan_info(
+          use_sm90_short_plan_args
+              ? plan_func(ffi_float_workspace_buffer,
+                          ffi_int_workspace_buffer,
+                          ffi_page_locked_int_workspace_buffer,
+                          to_ffi_tensor(qo_indptr_host),
+                          to_ffi_tensor(paged_kv_indptr_host),
+                          to_ffi_tensor(kv_len_arr_host),
+                          batch_size,  // total_num_rows
+                          batch_size,
+                          num_qo_heads,
+                          num_kv_heads,
+                          block_size,
+                          enable_cuda_graph,
+                          head_dim_qk,
+                          head_dim_vo,
+                          /*causal=*/false,
+                          /*window_size_left=*/-1)
+                    .cast<ffi::Array<int64_t>>()
+              : plan_func(ffi_float_workspace_buffer,
+                          ffi_int_workspace_buffer,
+                          ffi_page_locked_int_workspace_buffer,
+                          to_ffi_tensor(qo_indptr_host),
+                          to_ffi_tensor(paged_kv_indptr_host),
+                          to_ffi_tensor(kv_len_arr_host),
+                          batch_size,  // total_num_rows
+                          batch_size,
+                          num_qo_heads,
+                          num_kv_heads,
+                          block_size,
+                          enable_cuda_graph,
+                          head_dim_qk,
+                          head_dim_vo,
+                          /*causal=*/false,
+                          /*window_size_left=*/-1,
+                          /*fixed_split_size=*/-1,
+                          /*disable_split_kv=*/false,
+                          /*num_colocated_ctas=*/0)
+                    .cast<ffi::Array<int64_t>>());
     } else {
       plan_info->uri =
           get_batch_decode_uri(query_dtype,
