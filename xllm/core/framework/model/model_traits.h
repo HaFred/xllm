@@ -71,6 +71,17 @@ struct has_set_word_embedding<
         std::declval<layer::WordEmbedding&>()))>> : std::true_type {};
 
 template <typename T, typename = void>
+struct has_logits_for_decode_round : std::false_type {};
+
+template <typename T>
+struct has_logits_for_decode_round<
+    T,
+    std::void_t<decltype(std::declval<T>()->logits_for_decode_round(
+        std::declval<const torch::Tensor&>(),
+        std::declval<const torch::Tensor&>(),
+        std::declval<int32_t>()))>> : std::true_type {};
+
+template <typename T, typename = void>
 struct has_logits_with_hidden : std::false_type {};
 
 template <typename T>

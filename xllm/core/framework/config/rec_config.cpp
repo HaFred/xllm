@@ -15,8 +15,11 @@ limitations under the License.
 
 #include "core/framework/config/rec_config.h"
 
+#include <glog/logging.h>
+
 #include "core/common/global_flags.h"
 #include "core/framework/config/config_utils.h"
+#include "core/util/json_reader.h"
 
 DEFINE_bool(
     enable_rec_fast_sampler,
@@ -154,6 +157,30 @@ void RecConfig::initialize() {
   if (const auto& json_config = config::get_parsed_json_config()) {
     from_json(*json_config);
   }
+}
+
+void RecConfig::load_recif_from_model_config(const JsonReader& reader) {
+  recif_enabled_ = false;
+  recif_vocab_per_level_ = 8192;
+  recif_num_sid_levels_ = 3;
+  recif_external_heads_file_ = "recif_external_heads.safetensors";
+
+  if (!reader.contains("recif")) {
+    return;
+  }
+
+  recif_enabled_ = true;
+  recif_vocab_per_level_ =
+      reader.value_or<int32_t>("recif.vocab_per_level", recif_vocab_per_level_);
+  recif_num_sid_levels_ =
+      reader.value_or<int32_t>("recif.num_sid_levels", recif_num_sid_levels_);
+  recif_external_heads_file_ = reader.value_or<std::string>(
+      "recif.external_heads_file", recif_external_heads_file_);
+
+  LOG(INFO) << "Recif external SID heads enabled: vocab_per_level="
+            << recif_vocab_per_level_
+            << " num_sid_levels=" << recif_num_sid_levels_
+            << " external_heads_file=" << recif_external_heads_file_;
 }
 
 }  // namespace xllm

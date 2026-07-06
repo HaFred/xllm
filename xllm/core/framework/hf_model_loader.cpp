@@ -804,6 +804,7 @@ bool HFModelLoader::load_model_args(const std::string& model_weights_path) {
   args_.enable_mla(
       util::should_enable_mla(std::filesystem::path(model_weights_path),
                               ModelConfig::get_instance().backend()));
+  RecConfig::get_instance().load_recif_from_model_config(config_reader);
 
   return true;
 }

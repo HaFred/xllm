@@ -15,7 +15,10 @@ limitations under the License.
 
 #pragma once
 
+#include "core/framework/config/rec_config.h"
 #include "core/framework/model/model_output.h"
+#include "core/framework/model_loader.h"
+#include "core/framework/state_dict/state_dict.h"
 #if defined(USE_NPU)
 #include "core/common/global_flags.h"
 #include "core/layers/common/attention_mask.h"
@@ -279,7 +282,117 @@ TORCH_MODULE(Qwen3MoeModel);
 class Qwen3MoeForCausalLMImpl : public LlmForCausalLMImplBase<Qwen3MoeModel> {
  public:
   Qwen3MoeForCausalLMImpl(const ModelContext& context)
-      : LlmForCausalLMImplBase<Qwen3MoeModel>(context) {}
+      : LlmForCausalLMImplBase<Qwen3MoeModel>(context),
+        use_recif_external_heads_(RecConfig::get_instance().recif_enabled()) {
+    if (!use_recif_external_heads_) {
+      return;
+    }
+    const auto tensor_options = context.get_tensor_options();
+    recif_tensor_options_ = tensor_options;
+    const int64_t hidden_size = context.get_model_args().hidden_size();
+    const int64_t vocab_per_level =
+        RecConfig::get_instance().recif_vocab_per_level();
+    const int32_t num_sid_levels =
+        RecConfig::get_instance().recif_num_sid_levels();
+    auto heads = torch::nn::ModuleList();
+    for (int32_t level = 0; level < num_sid_levels; ++level) {
+      heads->push_back(torch::nn::Linear(
+          torch::nn::LinearOptions(hidden_size, vocab_per_level).bias(false)));
+    }
+    recif_heads_ = register_module("recif_heads", heads);
+    for (int32_t level = 0; level < num_sid_levels; ++level) {
+      auto& head =
+          recif_heads_->at<torch::nn::LinearImpl>(static_cast<size_t>(level));
+      head.to(recif_tensor_options_.device(),
+              recif_tensor_options_.dtype().toScalarType());
+    }
+  }
+
+  torch::Tensor logits(const torch::Tensor& hidden_states,
+                       const torch::Tensor& seleted_idxes) override {
+    if (use_recif_external_heads_) {
+      return logits_for_decode_round(hidden_states, seleted_idxes, 0);
+    }
+    return LlmForCausalLMImplBase<Qwen3MoeModel>::logits(hidden_states,
+                                                         seleted_idxes);
+  }
+
+  torch::Tensor logits_for_decode_round(const torch::Tensor& hidden_states,
+                                        const torch::Tensor& seleted_idxes,
+                                        int32_t sid_level) {
+    if (!use_recif_external_heads_) {
+      return LlmForCausalLMImplBase<Qwen3MoeModel>::logits(hidden_states,
+                                                           seleted_idxes);
+    }
+    CHECK_GE(sid_level, 0);
+    CHECK_LT(sid_level, RecConfig::get_instance().recif_num_sid_levels());
+    auto selected_hidden = hidden_states;
+    if (seleted_idxes.defined()) {
+      selected_hidden = hidden_states.index_select(/*dim=*/0, seleted_idxes);
+    }
+    auto& linear =
+        recif_heads_->at<torch::nn::LinearImpl>(static_cast<size_t>(sid_level));
+    return linear.forward(selected_hidden);
+  }
+
+  void load_model(std::unique_ptr<ModelLoader> loader,
+                  std::string prefix = "model.") override {
+    for (const auto& state_dict : loader->get_state_dicts()) {
+      model_->load_state_dict(state_dict->get_dict_with_prefix(
+          std::vector<std::string>{"model.language_model.",
+                                   "language_model.model.",
+                                   prefix,
+                                   "model.",
+                                   ""}));
+      const bool loaded_recif_heads =
+          use_recif_external_heads_ && load_recif_external_heads(*state_dict);
+      if (loaded_recif_heads) {
+        continue;
+      }
+      if (!embedding_mode_) {
+        if (tie_word_embeddings) {
+          auto lm_head_state_dict =
+              state_dict->get_dict_with_prefix(std::vector<std::string>{
+                  prefix + "embed_tokens.", "embed_tokens.", "embed."});
+          lm_head_->load_state_dict(lm_head_state_dict);
+        } else {
+          auto lm_head_state_dict = state_dict->get_dict_with_prefix(
+              std::vector<std::string>{"lm_head.",
+                                       "model.lm_head.",
+                                       "model.head.",
+                                       "head.",
+                                       prefix,
+                                       prefix + "lm_head.",
+                                       prefix + "head."});
+          lm_head_->load_state_dict(lm_head_state_dict);
+        }
+      }
+    }
+  }
+
+ private:
+  bool load_recif_external_heads(const StateDict& state_dict) {
+    const int32_t num_sid_levels =
+        RecConfig::get_instance().recif_num_sid_levels();
+    if (!state_dict.get_tensor("heads.0.weight").defined()) {
+      return false;
+    }
+    torch::NoGradGuard no_grad;
+    for (int32_t level = 0; level < num_sid_levels; ++level) {
+      const std::string key = "heads." + std::to_string(level) + ".weight";
+      torch::Tensor weight = state_dict.get_tensor(key);
+      CHECK(weight.defined()) << "missing recif external head weight: " << key;
+      auto& linear =
+          recif_heads_->at<torch::nn::LinearImpl>(static_cast<size_t>(level));
+      linear.weight.copy_(weight.to(recif_tensor_options_.device(),
+                                    recif_tensor_options_.dtype()));
+    }
+    return true;
+  }
+
+  bool use_recif_external_heads_{false};
+  torch::TensorOptions recif_tensor_options_{torch::kFloat32};
+  torch::nn::ModuleList recif_heads_{nullptr};
 };
 TORCH_MODULE(Qwen3MoeForCausalLM);
 

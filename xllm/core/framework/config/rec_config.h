@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <nlohmann/json_fwd.hpp>
+#include <string>
 
 #include "core/common/macros.h"
 #include "core/framework/config/option_category.h"
@@ -81,6 +82,33 @@ class RecConfig final {
   PROPERTY(int32_t, request_queue_size) = 100000;
 
   PROPERTY(uint32_t, rec_worker_max_concurrency) = 1;
+
+  // Parsed from model config.json "recif" block (bridge_moe_bs export).
+  void load_recif_from_model_config(const JsonReader& reader);
+
+  [[nodiscard]] bool recif_enabled() const { return recif_enabled_; }
+  [[nodiscard]] int32_t recif_vocab_per_level() const {
+    return recif_vocab_per_level_;
+  }
+  [[nodiscard]] int32_t recif_num_sid_levels() const {
+    return recif_num_sid_levels_;
+  }
+  [[nodiscard]] const std::string& recif_external_heads_file() const {
+    return recif_external_heads_file_;
+  }
+  [[nodiscard]] int32_t recif_token_offset_for_decode_step(
+      int32_t previous_step) const {
+    if (!recif_enabled_ || previous_step <= 0) {
+      return 0;
+    }
+    return previous_step * recif_vocab_per_level_;
+  }
+
+ private:
+  bool recif_enabled_{false};
+  int32_t recif_vocab_per_level_{8192};
+  int32_t recif_num_sid_levels_{3};
+  std::string recif_external_heads_file_{"recif_external_heads.safetensors"};
 };
 
 }  // namespace xllm

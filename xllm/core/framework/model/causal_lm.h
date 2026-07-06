@@ -95,6 +95,15 @@ class CausalLM : public torch::nn::Module {
   virtual torch::Tensor logits(const torch::Tensor& hidden_states,
                                const torch::Tensor& seleted_idxes) = 0;
 
+  // recif checkpoints score each SID byte with a dedicated external head.
+  virtual torch::Tensor logits_for_decode_round(
+      const torch::Tensor& hidden_states,
+      const torch::Tensor& seleted_idxes,
+      int32_t decode_round) {
+    (void)decode_round;
+    return logits(hidden_states, seleted_idxes);
+  }
+
   // hidden_states: [num_tokens, hidden_size]
   // seleted_idxes: [num_tokens]
   // out_hidden: [num_selected_tokens, hidden_size]
@@ -221,6 +230,16 @@ class CausalLMImpl : public CausalLM {
 
   torch::Tensor logits(const torch::Tensor& hidden_states,
                        const torch::Tensor& seleted_idxes) override {
+    return model_->logits(hidden_states, seleted_idxes);
+  }
+
+  torch::Tensor logits_for_decode_round(const torch::Tensor& hidden_states,
+                                        const torch::Tensor& seleted_idxes,
+                                        int32_t decode_round) override {
+    if constexpr (detail::has_logits_for_decode_round<Model>::value) {
+      return model_->logits_for_decode_round(
+          hidden_states, seleted_idxes, decode_round);
+    }
     return model_->logits(hidden_states, seleted_idxes);
   }
 

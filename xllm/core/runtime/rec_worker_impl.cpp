@@ -2282,8 +2282,8 @@ std::optional<ForwardOutput> RecWorkerImpl::LlmRecMultiRoundPipeline::step(
     torch::Tensor hidden_states = model_output.hidden_states;
 
     if (sampling_params.selected_token_idxes.defined()) {
-      logits = runtime_.model->logits(hidden_states,
-                                      sampling_params.selected_token_idxes);
+      logits = runtime_.model->logits_for_decode_round(
+          hidden_states, sampling_params.selected_token_idxes, round);
       sample_output = rec_sampler_->forward(logits, round_sampling_params);
     }
 
@@ -2541,6 +2541,12 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_two_stage_round_input(
   // flattened top_tokens from sampling would produce batch*top_k tokens while
   // decode positions and attention metadata are sized for batch*beam_width.
   input.token_ids = beam_tensors.out_token_ids.reshape({-1});
+  const int32_t recif_offset =
+      RecConfig::get_instance().recif_token_offset_for_decode_step(
+          previous_step);
+  if (recif_offset != 0) {
+    input.token_ids = input.token_ids + recif_offset;
+  }
 
   const auto* step_meta = input.step_meta();
   CHECK(step_meta != nullptr)
@@ -2728,6 +2734,13 @@ void RecWorkerImpl::LlmRecMultiRoundPipeline::prepare_input_for_current_round(
   } else if (previous_step > 0) {
     // Later steps use beam search output tokens.
     input.token_ids = beam_tensors.out_token_ids.reshape({-1});
+  }
+
+  const int32_t recif_offset =
+      RecConfig::get_instance().recif_token_offset_for_decode_step(
+          previous_step);
+  if (recif_offset != 0 && input.token_ids.defined()) {
+    input.token_ids = input.token_ids + recif_offset;
   }
 
   auto& llm_rec_params = input.input_params.mutable_llmrec_params();
